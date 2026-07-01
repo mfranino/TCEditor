@@ -1,4 +1,0 @@
-numpy
-pyqtgraph
-qtpy
-PySide6
