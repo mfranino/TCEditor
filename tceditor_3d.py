@@ -36,7 +36,7 @@ def _require_pyqtgraph_014() -> None:
 
 
 class Surface3DWindow(QtWidgets.QMainWindow):
-    """Display one characteristic channel as a triangulated PyQtGraph OpenGL surface."""
+    """Display one characteristic channel as a topology-preserving OpenGL surface."""
 
     DISPLAY_SPANS = np.asarray([12.0, 8.0, 6.0], dtype=float)
     AXIS_TICK_COUNT = 5
@@ -66,54 +66,25 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         self._build_surface()
 
     def _build_surface(self) -> None:
-        samples: list[tuple[float, float, float]] = []
-
-        for group in self.data.groups:
-            n11 = group.channels.get("N11")
-            values = group.channels.get(self.z_channel)
-            if n11 is None or values is None:
-                continue
-
-            for n11_value, z_value in zip(n11, values):
-                x = float(n11_value)
-                y = float(group.value)
-                z = float(z_value)
-                if np.isfinite(x) and np.isfinite(y) and np.isfinite(z):
-                    samples.append((x, y, z))
-
-        if len(samples) < 3:
+        raw_vertices, group_vertex_indices = self._collect_group_vertices()
+        if len(raw_vertices) < 3:
             raise ValueError(
                 f"At least three valid N11/a0/{self.z_channel} points are required for a 3D surface."
             )
+        if len(group_vertex_indices) < 2:
+            raise ValueError("At least two characteristic groups are required for a 3D surface.")
 
-        accumulated: dict[tuple[float, float], list[float]] = {}
-        for x_value, y_value, z_value in samples:
-            accumulated.setdefault((x_value, y_value), []).append(z_value)
+        faces = self._build_neighbor_strip_faces(group_vertex_indices)
+        if len(faces) == 0:
+            raise ValueError("No valid surface triangles could be generated between neighboring groups.")
 
-        coordinates = list(accumulated)
-        x = np.asarray([point[0] for point in coordinates], dtype=float)
-        y = np.asarray([point[1] for point in coordinates], dtype=float)
-        z = np.asarray(
-            [float(np.mean(accumulated[point])) for point in coordinates],
-            dtype=float,
-        )
-
-        if len(x) < 3:
-            raise ValueError("At least three unique N11/a0 points are required for triangulation.")
-        if np.ptp(x) == 0.0 or np.ptp(y) == 0.0:
-            raise ValueError("The N11/a0 points are collinear and cannot form a 3D surface.")
-
-        triangulation = self._triangulate_xy(x, y)
-        if triangulation.size == 0:
-            raise ValueError("No valid triangles could be generated from the characteristic points.")
-
-        raw_vertices = np.column_stack((x, y, z)).astype(float)
+        raw_vertices = np.asarray(raw_vertices, dtype=float)
         raw_mins = raw_vertices.min(axis=0)
         raw_maxs = raw_vertices.max(axis=0)
         display_vertices = self._scale_vertices_for_display(raw_vertices)
-        faces = np.asarray(triangulation, dtype=np.uint32)
+        faces_array = np.asarray(faces, dtype=np.uint32)
 
-        mesh_data = gl.MeshData(vertexes=display_vertices, faces=faces)
+        mesh_data = gl.MeshData(vertexes=display_vertices, faces=faces_array)
         mesh = gl.GLMeshItem(
             meshdata=mesh_data,
             smooth=False,
@@ -138,6 +109,70 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         self._add_reference_axes(raw_mins, raw_maxs)
         self._fit_camera(display_vertices)
 
+    def _collect_group_vertices(self) -> tuple[list[tuple[float, float, float]], list[list[int]]]:
+        """Collect points group-by-group while preserving the original row order."""
+        vertices: list[tuple[float, float, float]] = []
+        group_vertex_indices: list[list[int]] = []
+
+        for group in self.data.groups:
+            n11 = group.channels.get("N11")
+            values = group.channels.get(self.z_channel)
+            if n11 is None or values is None:
+                continue
+
+            indices: list[int] = []
+            for n11_value, z_value in zip(n11, values):
+                x = float(n11_value)
+                y = float(group.value)
+                z = float(z_value)
+                if not (np.isfinite(x) and np.isfinite(y) and np.isfinite(z)):
+                    continue
+                indices.append(len(vertices))
+                vertices.append((x, y, z))
+
+            if indices:
+                group_vertex_indices.append(indices)
+
+        return vertices, group_vertex_indices
+
+    def _build_neighbor_strip_faces(self, group_vertex_indices: list[list[int]]) -> list[tuple[int, int, int]]:
+        """Triangulate only between neighboring a0 groups using the original point order."""
+        faces: list[tuple[int, int, int]] = []
+        for left, right in zip(group_vertex_indices[:-1], group_vertex_indices[1:]):
+            if len(left) < 2 or len(right) < 2:
+                continue
+            faces.extend(self._zip_two_group_curves(left, right))
+        return faces
+
+    def _zip_two_group_curves(self, left: list[int], right: list[int]) -> list[tuple[int, int, int]]:
+        """Create a triangle strip between two ordered curves, also when row counts differ."""
+        faces: list[tuple[int, int, int]] = []
+        i = 0
+        j = 0
+        left_last = len(left) - 1
+        right_last = len(right) - 1
+
+        while i < left_last or j < right_last:
+            if i >= left_last:
+                faces.append((left[i], right[j], right[j + 1]))
+                j += 1
+                continue
+            if j >= right_last:
+                faces.append((left[i], left[i + 1], right[j]))
+                i += 1
+                continue
+
+            next_left_fraction = (i + 1) / left_last
+            next_right_fraction = (j + 1) / right_last
+            if next_left_fraction <= next_right_fraction:
+                faces.append((left[i], left[i + 1], right[j]))
+                i += 1
+            else:
+                faces.append((left[i], right[j], right[j + 1]))
+                j += 1
+
+        return faces
+
     def _set_scatter_visible(self, visible: bool) -> None:
         if self.scatter_item is not None:
             self.scatter_item.setVisible(visible)
@@ -149,21 +184,6 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         safe_spans = np.where(spans > 1e-12, spans, 1.0)
         normalized = (vertices - mins) / safe_spans
         return normalized * self.DISPLAY_SPANS
-
-    def _triangulate_xy(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """Return Delaunay triangles in the real N11-a0 plane."""
-        try:
-            from scipy.spatial import Delaunay
-        except ImportError as exc:
-            raise RuntimeError(
-                "3D triangulation requires scipy. Install it with: pip install scipy"
-            ) from exc
-
-        points = np.column_stack((x, y))
-        try:
-            return Delaunay(points).simplices
-        except Exception as exc:
-            raise ValueError(f"Unable to triangulate N11/a0 points: {exc}") from exc
 
     def _add_reference_axes(self, raw_mins: np.ndarray, raw_maxs: np.ndarray) -> None:
         """Add normalized OpenGL axes with labels showing the real engineering values."""
