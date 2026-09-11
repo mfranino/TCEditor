@@ -85,14 +85,6 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         )
         self.view.addItem(mesh)
 
-        points = gl.GLScatterPlotItem(
-            pos=vertices,
-            size=6,
-            color=(0.1, 0.1, 0.1, 1.0),
-            pxMode=True,
-        )
-        self.view.addItem(points)
-
         self._add_reference_axes(vertices)
         self._fit_camera(vertices)
 
