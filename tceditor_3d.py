@@ -40,6 +40,7 @@ class Surface3DWindow(QtWidgets.QMainWindow):
 
     DISPLAY_SPANS = np.asarray([12.0, 8.0, 6.0], dtype=float)
     AXIS_TICK_COUNT = 5
+    RESAMPLE_COUNT = 150
 
     def __init__(self, data: CharacteristicData, z_channel: str) -> None:
         super().__init__()
@@ -66,22 +67,44 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         self._build_surface()
 
     def _build_surface(self) -> None:
-        raw_vertices, group_vertex_indices = self._collect_group_vertices()
-        if len(raw_vertices) < 3:
+        original_groups = self._collect_group_curves()
+        if len(original_groups) < 2:
+            raise ValueError("At least two characteristic groups are required for a 3D surface.")
+
+        original_vertices = np.vstack(
+            [
+                np.column_stack(
+                    (
+                        group["x"],
+                        np.full(len(group["x"]), group["a0"], dtype=float),
+                        group["z"],
+                    )
+                )
+                for group in original_groups
+            ]
+        )
+        if len(original_vertices) < 3:
             raise ValueError(
                 f"At least three valid N11/a0/{self.z_channel} points are required for a 3D surface."
             )
-        if len(group_vertex_indices) < 2:
-            raise ValueError("At least two characteristic groups are required for a 3D surface.")
 
-        faces = self._build_neighbor_strip_faces(group_vertex_indices)
+        raw_mins = original_vertices.min(axis=0)
+        raw_maxs = original_vertices.max(axis=0)
+        raw_spans = raw_maxs - raw_mins
+
+        resampled_groups = [
+            self._resample_curve(group, raw_spans[0], raw_spans[2])
+            for group in original_groups
+        ]
+        raw_mesh_vertices, faces = self._build_regular_strip_mesh(resampled_groups)
         if len(faces) == 0:
             raise ValueError("No valid surface triangles could be generated between neighboring groups.")
 
-        raw_vertices = np.asarray(raw_vertices, dtype=float)
-        raw_mins = raw_vertices.min(axis=0)
-        raw_maxs = raw_vertices.max(axis=0)
-        display_vertices = self._scale_vertices_for_display(raw_vertices)
+        display_vertices = self._scale_vertices_for_display(
+            raw_mesh_vertices,
+            raw_mins,
+            raw_maxs,
+        )
         faces_array = np.asarray(faces, dtype=np.uint32)
 
         mesh_data = gl.MeshData(vertexes=display_vertices, faces=faces_array)
@@ -97,8 +120,13 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         )
         self.view.addItem(mesh)
 
+        scatter_vertices = self._scale_vertices_for_display(
+            original_vertices,
+            raw_mins,
+            raw_maxs,
+        )
         self.scatter_item = gl.GLScatterPlotItem(
-            pos=display_vertices,
+            pos=scatter_vertices,
             size=6,
             color=(0.05, 0.05, 0.05, 1.0),
             pxMode=True,
@@ -109,10 +137,9 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         self._add_reference_axes(raw_mins, raw_maxs)
         self._fit_camera(display_vertices)
 
-    def _collect_group_vertices(self) -> tuple[list[tuple[float, float, float]], list[list[int]]]:
-        """Collect points group-by-group while preserving the original row order."""
-        vertices: list[tuple[float, float, float]] = []
-        group_vertex_indices: list[list[int]] = []
+    def _collect_group_curves(self) -> list[dict[str, object]]:
+        """Collect valid characteristic curves and keep their original point order."""
+        curves: list[dict[str, object]] = []
 
         for group in self.data.groups:
             n11 = group.channels.get("N11")
@@ -120,69 +147,106 @@ class Surface3DWindow(QtWidgets.QMainWindow):
             if n11 is None or values is None:
                 continue
 
-            indices: list[int] = []
-            for n11_value, z_value in zip(n11, values):
-                x = float(n11_value)
-                y = float(group.value)
-                z = float(z_value)
-                if not (np.isfinite(x) and np.isfinite(y) and np.isfinite(z)):
-                    continue
-                indices.append(len(vertices))
-                vertices.append((x, y, z))
+            x = np.asarray(n11, dtype=float)
+            z = np.asarray(values, dtype=float)
+            valid = np.isfinite(x) & np.isfinite(z)
+            x = x[valid]
+            z = z[valid]
+            if len(x) < 2:
+                continue
 
-            if indices:
-                group_vertex_indices.append(indices)
+            curves.append(
+                {
+                    "a0": float(group.value),
+                    "x": x,
+                    "z": z,
+                }
+            )
 
-        return vertices, group_vertex_indices
+        curves.sort(key=lambda item: float(item["a0"]))
+        return curves
 
-    def _build_neighbor_strip_faces(self, group_vertex_indices: list[list[int]]) -> list[tuple[int, int, int]]:
-        """Triangulate only between neighboring a0 groups using the original point order."""
+    def _resample_curve(
+        self,
+        curve: dict[str, object],
+        global_x_span: float,
+        global_z_span: float,
+    ) -> dict[str, object]:
+        """Resample one curve on a common normalized arc-length coordinate."""
+        x = np.asarray(curve["x"], dtype=float)
+        z = np.asarray(curve["z"], dtype=float)
+
+        x_scale = global_x_span if global_x_span > 1e-12 else 1.0
+        z_scale = global_z_span if global_z_span > 1e-12 else 1.0
+        dx = np.diff(x) / x_scale
+        dz = np.diff(z) / z_scale
+        segment_length = np.hypot(dx, dz)
+        s = np.concatenate(([0.0], np.cumsum(segment_length)))
+
+        if s[-1] <= 1e-12:
+            raise ValueError(f"Characteristic group a0={curve['a0']} has zero curve length.")
+
+        s /= s[-1]
+
+        # np.interp requires strictly increasing sample locations. Remove repeated
+        # arc-length stations caused by duplicate consecutive points.
+        keep = np.concatenate(([True], np.diff(s) > 1e-12))
+        s = s[keep]
+        x = x[keep]
+        z = z[keep]
+        if len(s) < 2:
+            raise ValueError(f"Characteristic group a0={curve['a0']} has too few unique points.")
+
+        s_new = np.linspace(0.0, 1.0, self.RESAMPLE_COUNT)
+        return {
+            "a0": float(curve["a0"]),
+            "x": np.interp(s_new, s, x),
+            "z": np.interp(s_new, s, z),
+        }
+
+    def _build_regular_strip_mesh(
+        self,
+        groups: list[dict[str, object]],
+    ) -> tuple[np.ndarray, list[tuple[int, int, int]]]:
+        """Build a regular mesh after all curves share the same arc-length stations."""
+        vertices: list[np.ndarray] = []
+        for group in groups:
+            x = np.asarray(group["x"], dtype=float)
+            z = np.asarray(group["z"], dtype=float)
+            y = np.full(len(x), float(group["a0"]), dtype=float)
+            vertices.append(np.column_stack((x, y, z)))
+
+        mesh_vertices = np.vstack(vertices)
+        points_per_group = self.RESAMPLE_COUNT
         faces: list[tuple[int, int, int]] = []
-        for left, right in zip(group_vertex_indices[:-1], group_vertex_indices[1:]):
-            if len(left) < 2 or len(right) < 2:
-                continue
-            faces.extend(self._zip_two_group_curves(left, right))
-        return faces
 
-    def _zip_two_group_curves(self, left: list[int], right: list[int]) -> list[tuple[int, int, int]]:
-        """Create a triangle strip between two ordered curves, also when row counts differ."""
-        faces: list[tuple[int, int, int]] = []
-        i = 0
-        j = 0
-        left_last = len(left) - 1
-        right_last = len(right) - 1
+        for group_index in range(len(groups) - 1):
+            lower_offset = group_index * points_per_group
+            upper_offset = (group_index + 1) * points_per_group
+            for point_index in range(points_per_group - 1):
+                p00 = lower_offset + point_index
+                p01 = lower_offset + point_index + 1
+                p10 = upper_offset + point_index
+                p11 = upper_offset + point_index + 1
+                faces.append((p00, p01, p10))
+                faces.append((p01, p11, p10))
 
-        while i < left_last or j < right_last:
-            if i >= left_last:
-                faces.append((left[i], right[j], right[j + 1]))
-                j += 1
-                continue
-            if j >= right_last:
-                faces.append((left[i], left[i + 1], right[j]))
-                i += 1
-                continue
-
-            next_left_fraction = (i + 1) / left_last
-            next_right_fraction = (j + 1) / right_last
-            if next_left_fraction <= next_right_fraction:
-                faces.append((left[i], left[i + 1], right[j]))
-                i += 1
-            else:
-                faces.append((left[i], right[j], right[j + 1]))
-                j += 1
-
-        return faces
+        return mesh_vertices, faces
 
     def _set_scatter_visible(self, visible: bool) -> None:
         if self.scatter_item is not None:
             self.scatter_item.setVisible(visible)
 
-    def _scale_vertices_for_display(self, vertices: np.ndarray) -> np.ndarray:
+    def _scale_vertices_for_display(
+        self,
+        vertices: np.ndarray,
+        raw_mins: np.ndarray,
+        raw_maxs: np.ndarray,
+    ) -> np.ndarray:
         """Scale N11, a0 and Z independently so all three dimensions remain visible."""
-        mins = vertices.min(axis=0)
-        spans = vertices.max(axis=0) - mins
+        spans = raw_maxs - raw_mins
         safe_spans = np.where(spans > 1e-12, spans, 1.0)
-        normalized = (vertices - mins) / safe_spans
+        normalized = (vertices - raw_mins) / safe_spans
         return normalized * self.DISPLAY_SPANS
 
     def _add_reference_axes(self, raw_mins: np.ndarray, raw_maxs: np.ndarray) -> None:
