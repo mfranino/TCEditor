@@ -7,7 +7,7 @@ TCEditor is a small QtPy and pyqtgraph application for editing pump-turbine char
 Install Python 3.10 or newer, then install the required packages:
 
 ```powershell
-pip install numpy qtpy pyqtgraph PySide6 scipy PyOpenGL
+pip install numpy qtpy "pyqtgraph>=0.14.0" PySide6 scipy PyOpenGL
 ```
 
 Run the standard 2D editor:
@@ -54,7 +54,7 @@ Files are read with `utf-8-sig`, `cp1250`, or `latin-1` encoding. Data rows may 
 - In `tceditor_3d.py`, open `View > Q11 3D surface...` to display a PyQtGraph OpenGL triangulated surface with `N11` on X, `a0` on Y, and `Q11` on Z.
 - In `tceditor_3d.py`, open `View > T11 3D surface...` to display a PyQtGraph OpenGL triangulated surface with `N11` on X, `a0` on Y, and `T11` on Z.
 - The 3D surfaces use SciPy Delaunay triangulation in the `N11-a0` plane and render the resulting triangles with `pyqtgraph.opengl.GLMeshItem`.
-- Original characteristic points are displayed with `GLScatterPlotItem`; the 3D windows also include OpenGL axes and an XY reference grid.
+- The triangulation is shown as mesh geometry without separate scatter-point markers.
 - The 3D windows use the current in-memory characteristic data, including point and group edits made before the window is opened.
 
 ## Saving
