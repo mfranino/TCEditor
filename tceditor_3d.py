@@ -142,8 +142,8 @@ class CharacteristicWindow3D(CharacteristicWindow):
     """TCEditor main window extended with Q11 and T11 3D surface views."""
 
     def __init__(self) -> None:
-        super().__init__()
         self.surface_windows: dict[str, Surface3DWindow] = {}
+        super().__init__()
 
         view_menu = self.menuBar().addMenu("View")
 
@@ -152,6 +152,11 @@ class CharacteristicWindow3D(CharacteristicWindow):
 
         self.t11_3d_action = view_menu.addAction("T11 3D surface...")
         self.t11_3d_action.triggered.connect(lambda: self.show_3d_surface("T11"))
+
+    def _forget_surface_window(self, channel: str) -> None:
+        windows = getattr(self, "surface_windows", None)
+        if windows is not None:
+            windows.pop(channel, None)
 
     def show_3d_surface(self, channel: str) -> None:
         if self.data is None:
@@ -186,7 +191,7 @@ class CharacteristicWindow3D(CharacteristicWindow):
             window = Surface3DWindow(self.data, channel)
             self.surface_windows[channel] = window
             window.destroyed.connect(
-                lambda _=None, name=channel: self.surface_windows.pop(name, None)
+                lambda _=None, name=channel: self._forget_surface_window(name)
             )
             window.show()
             window.raise_()
