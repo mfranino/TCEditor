@@ -4,9 +4,7 @@ import sys
 
 import numpy as np
 import pyqtgraph as pg
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from matplotlib.tri import Triangulation
+import pyqtgraph.opengl as gl
 from qtpy import QtWidgets
 
 from characteristic_parser import CharacteristicData
@@ -14,7 +12,7 @@ from tceditor import CharacteristicWindow
 
 
 class Surface3DWindow(QtWidgets.QMainWindow):
-    """Display one characteristic channel as a triangulated 3D surface."""
+    """Display one characteristic channel as a triangulated PyQtGraph OpenGL surface."""
 
     def __init__(self, data: CharacteristicData, z_channel: str) -> None:
         super().__init__()
@@ -23,15 +21,13 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"TCEditor - {z_channel}(N11, a0) 3D surface")
         self.resize(900, 700)
 
-        self.figure = Figure(figsize=(9, 7))
-        self.canvas = FigureCanvas(self.figure)
-        self.setCentralWidget(self.canvas)
-        self.axes = self.figure.add_subplot(111, projection="3d")
-        self.refresh_surface()
+        self.view = gl.GLViewWidget()
+        self.view.setBackgroundColor("w")
+        self.setCentralWidget(self.view)
 
-    def refresh_surface(self) -> None:
-        self.figure.clear()
-        self.axes = self.figure.add_subplot(111, projection="3d")
+        self._build_surface()
+
+    def _build_surface(self) -> None:
         samples: list[tuple[float, float, float]] = []
 
         for group in self.data.groups:
@@ -69,32 +65,85 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         if np.ptp(x) == 0.0 or np.ptp(y) == 0.0:
             raise ValueError("The N11/a0 points are collinear and cannot form a 3D surface.")
 
-        triangulation = Triangulation(x, y)
-        if triangulation.triangles.size == 0:
+        triangulation = self._triangulate_xy(x, y)
+        if triangulation.size == 0:
             raise ValueError("No valid triangles could be generated from the characteristic points.")
 
-        surface = self.axes.plot_trisurf(
-            triangulation,
-            z,
-            linewidth=0.35,
-            antialiased=True,
-            alpha=0.9,
-        )
-        self.axes.scatter(x, y, z, s=10)
+        vertices = np.column_stack((x, y, z)).astype(float)
+        faces = np.asarray(triangulation, dtype=np.uint32)
 
-        self.axes.set_xlabel("N11")
-        self.axes.set_ylabel("a0")
-        self.axes.set_zlabel(self.z_channel)
-        self.axes.set_title(f"{self.z_channel}(N11, a0) - triangulated surface")
-        self.figure.colorbar(
-            surface,
-            ax=self.axes,
-            shrink=0.68,
-            pad=0.1,
-            label=self.z_channel,
+        mesh_data = gl.MeshData(vertexes=vertices, faces=faces)
+        mesh = gl.GLMeshItem(
+            meshdata=mesh_data,
+            smooth=False,
+            drawFaces=True,
+            drawEdges=True,
+            edgeColor=(0.15, 0.15, 0.15, 0.8),
+            color=(0.25, 0.55, 0.85, 0.65),
+            shader="shaded",
+            glOptions="translucent",
         )
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
+        self.view.addItem(mesh)
+
+        points = gl.GLScatterPlotItem(
+            pos=vertices,
+            size=6,
+            color=(0.1, 0.1, 0.1, 1.0),
+            pxMode=True,
+        )
+        self.view.addItem(points)
+
+        self._add_reference_axes(vertices)
+        self._fit_camera(vertices)
+
+    def _triangulate_xy(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Return Delaunay triangles in the N11-a0 plane without Matplotlib."""
+        try:
+            from scipy.spatial import Delaunay
+        except ImportError as exc:
+            raise RuntimeError(
+                "3D triangulation requires scipy. Install it with: pip install scipy"
+            ) from exc
+
+        points = np.column_stack((x, y))
+        try:
+            return Delaunay(points).simplices
+        except Exception as exc:
+            raise ValueError(f"Unable to triangulate N11/a0 points: {exc}") from exc
+
+    def _add_reference_axes(self, vertices: np.ndarray) -> None:
+        mins = vertices.min(axis=0)
+        maxs = vertices.max(axis=0)
+        spans = np.maximum(maxs - mins, 1e-9)
+
+        axis = gl.GLAxisItem()
+        axis.setSize(x=float(spans[0]), y=float(spans[1]), z=float(spans[2]))
+        axis.translate(float(mins[0]), float(mins[1]), float(mins[2]))
+        self.view.addItem(axis)
+
+        grid_xy = gl.GLGridItem()
+        grid_xy.setSize(x=float(spans[0]), y=float(spans[1]))
+        grid_xy.setSpacing(
+            x=max(float(spans[0]) / 10.0, 1e-9),
+            y=max(float(spans[1]) / 10.0, 1e-9),
+        )
+        grid_xy.translate(
+            float((mins[0] + maxs[0]) / 2.0),
+            float((mins[1] + maxs[1]) / 2.0),
+            float(mins[2]),
+        )
+        self.view.addItem(grid_xy)
+
+    def _fit_camera(self, vertices: np.ndarray) -> None:
+        mins = vertices.min(axis=0)
+        maxs = vertices.max(axis=0)
+        center = (mins + maxs) / 2.0
+        span = float(np.max(maxs - mins))
+        if span <= 0.0:
+            span = 1.0
+
+        self.view.opts["center"] = pg.Vector(*center)
+        self.view.setCameraPosition(distance=span * 2.5, elevation=25, azimuth=-45)
 
 
 class CharacteristicWindow3D(CharacteristicWindow):
