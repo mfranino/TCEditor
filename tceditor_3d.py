@@ -38,6 +38,8 @@ def _require_pyqtgraph_014() -> None:
 class Surface3DWindow(QtWidgets.QMainWindow):
     """Display one characteristic channel as a triangulated PyQtGraph OpenGL surface."""
 
+    DISPLAY_SPANS = np.asarray([12.0, 8.0, 6.0], dtype=float)
+
     def __init__(self, data: CharacteristicData, z_channel: str) -> None:
         super().__init__()
         self.data = data
@@ -93,27 +95,36 @@ class Surface3DWindow(QtWidgets.QMainWindow):
         if triangulation.size == 0:
             raise ValueError("No valid triangles could be generated from the characteristic points.")
 
-        vertices = np.column_stack((x, y, z)).astype(float)
+        raw_vertices = np.column_stack((x, y, z)).astype(float)
+        display_vertices = self._scale_vertices_for_display(raw_vertices)
         faces = np.asarray(triangulation, dtype=np.uint32)
 
-        mesh_data = gl.MeshData(vertexes=vertices, faces=faces)
+        mesh_data = gl.MeshData(vertexes=display_vertices, faces=faces)
         mesh = gl.GLMeshItem(
             meshdata=mesh_data,
             smooth=False,
             drawFaces=True,
             drawEdges=True,
-            edgeColor=(0.15, 0.15, 0.15, 0.8),
-            color=(0.25, 0.55, 0.85, 0.65),
+            edgeColor=(0.15, 0.15, 0.15, 0.85),
+            color=(0.25, 0.55, 0.85, 0.72),
             shader="shaded",
             glOptions="translucent",
         )
         self.view.addItem(mesh)
 
-        self._add_reference_axes(vertices)
-        self._fit_camera(vertices)
+        self._add_reference_axes(display_vertices)
+        self._fit_camera(display_vertices)
+
+    def _scale_vertices_for_display(self, vertices: np.ndarray) -> np.ndarray:
+        """Scale N11, a0 and Z independently so all three dimensions remain visible."""
+        mins = vertices.min(axis=0)
+        spans = vertices.max(axis=0) - mins
+        safe_spans = np.where(spans > 1e-12, spans, 1.0)
+        normalized = (vertices - mins) / safe_spans
+        return normalized * self.DISPLAY_SPANS
 
     def _triangulate_xy(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """Return Delaunay triangles in the N11-a0 plane without Matplotlib."""
+        """Return Delaunay triangles in the real N11-a0 plane."""
         try:
             from scipy.spatial import Delaunay
         except ImportError as exc:
@@ -159,7 +170,7 @@ class Surface3DWindow(QtWidgets.QMainWindow):
             span = 1.0
 
         self.view.opts["center"] = pg.Vector(*center)
-        self.view.setCameraPosition(distance=span * 2.5, elevation=25, azimuth=-45)
+        self.view.setCameraPosition(distance=span * 2.1, elevation=24, azimuth=-45)
 
 
 class CharacteristicWindow3D(CharacteristicWindow):
