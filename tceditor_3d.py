@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 import numpy as np
 import pyqtgraph as pg
@@ -9,6 +10,29 @@ from qtpy import QtWidgets
 
 from characteristic_parser import CharacteristicData
 from tceditor import CharacteristicWindow
+
+
+def _require_pyqtgraph_014() -> None:
+    try:
+        raw_version = version("pyqtgraph")
+    except PackageNotFoundError as exc:
+        raise RuntimeError("PyQtGraph is not installed.") from exc
+
+    numeric = []
+    for part in raw_version.split("."):
+        digits = "".join(ch for ch in part if ch.isdigit())
+        if not digits:
+            break
+        numeric.append(int(digits))
+        if len(numeric) == 2:
+            break
+
+    current = tuple(numeric + [0] * (2 - len(numeric)))
+    if current < (0, 14):
+        raise RuntimeError(
+            f"TCEditor 3D requires PyQtGraph 0.14 or newer; found {raw_version}. "
+            "Upgrade with: python -m pip install --upgrade \"pyqtgraph>=0.14.0\" PyOpenGL"
+        )
 
 
 class Surface3DWindow(QtWidgets.QMainWindow):
@@ -201,6 +225,12 @@ class CharacteristicWindow3D(CharacteristicWindow):
 
 
 def main() -> int:
+    try:
+        _require_pyqtgraph_014()
+    except RuntimeError as exc:
+        print(exc)
+        return 1
+
     app = QtWidgets.QApplication(sys.argv)
     pg.setConfigOptions(antialias=True)
     window = CharacteristicWindow3D()
