@@ -1,6 +1,7 @@
 """Launch multi-file TCEditor with one vertically resizable control column.
 
-The existing multi-file loading, selection, editing and plotting logic is reused.
+Plot selections are independent of which file is active for editing. Clicking
+individual curves never silently switches the editing file or resets the plot.
 """
 from __future__ import annotations
 
@@ -10,26 +11,22 @@ import pyqtgraph as pg
 from qtpy import QtCore, QtWidgets
 
 from tceditor_3d import _require_pyqtgraph_014
-from tceditor_multifile import MultiFileCharacteristicWindow
+from tceditor_multifile import KIND, MultiFileCharacteristicWindow
 
 
 class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
-    """Move existing widgets into a single sidebar with drag-to-resize panels."""
+    """Stack controls and support cumulative plotting across loaded files."""
 
     def __init__(self) -> None:
         super().__init__()
 
-        # Qt ExtendedSelection clears earlier selections on a plain click.
-        # MultiSelection toggles each clicked curve independently, including
-        # curves belonging to different files. _visible_curves() already uses
-        # the complete selectedItems() set to build the combined plot.
         self.file_tree.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
         self.file_tree.setHeaderLabels(["Files / constant-y curves (click to add/remove)"])
 
         main_splitter = self.centralWidget()
         old_controls = self.group_list.parentWidget()
         old_layout = old_controls.layout()
-        # Preserve the hidden legacy group list required for edit operations.
+        # Keep hidden controls needed by the legacy editing operations.
         self._legacy_controls = old_controls
         x_label = old_layout.itemAt(1).widget()
         channels_label = old_layout.itemAt(5).widget()
@@ -42,8 +39,6 @@ class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
         dock = self.findChild(QtWidgets.QDockWidget, "CharacteristicFilesDock")
         if dock is None or dock.widget() is not self.file_tree:
             raise RuntimeError("Multi-file tree dock was not found.")
-        # The tree is reparented by vertical.addWidget below. Keep the dock
-        # alive until that happens, so Qt cannot delete the tree prematurely.
         self.removeDockWidget(dock)
         dock.hide()
         old_controls.setParent(None)
@@ -90,6 +85,25 @@ class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
         main_splitter.setSizes([330, 750, 330])
         vertical.setSizes([410, 180, 175])
         self.setWindowTitle("TCEditor - multi-file")
+
+    def _tree_clicked(self, item, column) -> None:
+        """Select for plotting, but do not activate/rebuild a different file.
+
+        Automatically selected file rows from imports represent 'show all'.
+        Once the user starts selecting individual curves, clear those whole-file
+        selections so only explicitly selected curves are plotted. Clicking a
+        file row itself can still select the whole file deliberately.
+        """
+        if item.data(0, KIND) == "group" and item.isSelected():
+            self.file_tree.blockSignals(True)
+            try:
+                for index in range(self.file_tree.topLevelItemCount()):
+                    file_item = self.file_tree.topLevelItem(index)
+                    if file_item.isSelected():
+                        file_item.setSelected(False)
+            finally:
+                self.file_tree.blockSignals(False)
+        self.refresh_plot()
 
 
 def main() -> int:
