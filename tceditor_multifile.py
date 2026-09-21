@@ -1,7 +1,8 @@
-"""Multi-file characteristic editor with global channel selection.
+"""Multi-file characteristic editor with mouse-selected curves and global channels.
 
-Tree checkboxes select files and constant-y curves; the original Y channels
-list selects channels for every visible curve, as in the single-file editor.
+Select file/constant-y rows with Ctrl/Shift to plot them. Selecting a file
+includes all its curves; the shared Y channels list applies to all files.
+Only the active file is editable and saved.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ GROUP = QtCore.Qt.UserRole + 2
 
 
 class NamedSurface3DWindow(Surface3DWindow):
-    """Show the true group-column label, rather than hardcoded a0."""
+    """Label the constant-value axis with the actual first column name."""
 
     def _add_reference_axes(self, raw_mins: np.ndarray, raw_maxs: np.ndarray) -> None:
         x_span, y_span, z_span = map(float, self.DISPLAY_SPANS)
@@ -62,9 +63,9 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         super().__init__()
 
         self.file_tree = QtWidgets.QTreeWidget()
-        self.file_tree.setHeaderLabels(["Files / constant-y curves"])
+        self.file_tree.setHeaderLabels(["Files / constant-y curves (Ctrl/Shift to select)"])
         self.file_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
-        self.file_tree.itemChanged.connect(self._tree_changed)
+        self.file_tree.itemSelectionChanged.connect(self.refresh_plot)
         self.file_tree.itemClicked.connect(self._tree_clicked)
         self.file_tree.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.file_tree.customContextMenuRequested.connect(self._tree_context_menu)
@@ -74,15 +75,13 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, dock)
         self.resizeDocks([dock], [310], QtCore.Qt.Horizontal)
 
-        # Hide ONLY the obsolete flat group controls. Restore the original
-        # shared Y-channel selector, keeping N11 available as an X-axis choice.
+        # Keep only the obsolete flat group list hidden. Restore the original
+        # shared Y-channel list and X-axis selector.
         layout = self.group_list.parentWidget().layout()
-        layout.itemAt(3).widget().hide()  # Groups label
+        layout.itemAt(3).widget().hide()
         self.group_list.hide()
+        layout.itemAt(5).widget().show()
         self.channel_list.show()
-        layout.itemAt(5).widget().show()  # Y channels label
-        self.channel_list.itemSelectionChanged.connect(self.refresh_plot)
-
         self.open_action.setText("Add characteristic files...")
         self.open_button.setText("Add characteristic files...")
         file_menu = self.menuBar().actions()[0].menu()
@@ -114,6 +113,8 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         self._rebuild_tree()
         if first_new is not None:
             self._activate(first_new)
+        elif self.active_path is not None:
+            self.refresh_plot()
         if errors:
             QtWidgets.QMessageBox.warning(self, "Import errors", "\n".join(errors))
         self.statusBar().showMessage(f"{len(self.files)} characteristic file(s) loaded")
@@ -127,18 +128,20 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         self._activate(key)
 
     @staticmethod
-    def _checked(item: QtWidgets.QTreeWidgetItem) -> bool:
-        return item.checkState(0) == QtCore.Qt.Checked
+    def _tree_key(item: QtWidgets.QTreeWidgetItem) -> tuple[str, ...]:
+        path = item.data(0, PATH)
+        if item.data(0, KIND) == "file":
+            return (path,)
+        return (path, item.data(0, GROUP))
 
     def _rebuild_tree(self) -> None:
-        old = {}
-        for i in range(self.file_tree.topLevelItemCount()):
-            file_item = self.file_tree.topLevelItem(i)
-            path = file_item.data(0, PATH)
-            old[(path,)] = self._checked(file_item)
-            for j in range(file_item.childCount()):
-                group_item = file_item.child(j)
-                old[(path, group_item.data(0, GROUP))] = self._checked(group_item)
+        # Preserve mouse selection across editing, active-file changes and
+        # additional imports. Newly added files are selected automatically.
+        selected = {self._tree_key(item) for item in self.file_tree.selectedItems()}
+        old_paths = {
+            self.file_tree.topLevelItem(i).data(0, PATH)
+            for i in range(self.file_tree.topLevelItemCount())
+        }
         self._rebuilding = True
         self.file_tree.blockSignals(True)
         try:
@@ -148,9 +151,8 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
                 file_item.setData(0, KIND, "file")
                 file_item.setData(0, PATH, path)
                 file_item.setToolTip(0, path)
-                file_item.setFlags(file_item.flags() | QtCore.Qt.ItemIsUserCheckable)
-                file_item.setCheckState(0, QtCore.Qt.Checked if old.get((path,), True) else QtCore.Qt.Unchecked)
                 self.file_tree.addTopLevelItem(file_item)
+                file_item.setSelected((path,) in selected or path not in old_paths)
                 font = file_item.font(0)
                 font.setBold(path == self.active_path)
                 file_item.setFont(0, font)
@@ -159,9 +161,8 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
                     item.setData(0, KIND, "group")
                     item.setData(0, PATH, path)
                     item.setData(0, GROUP, group.name)
-                    item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-                    item.setCheckState(0, QtCore.Qt.Checked if old.get((path, group.name), True) else QtCore.Qt.Unchecked)
                     file_item.addChild(item)
+                    item.setSelected((path, group.name) in selected)
                 file_item.setExpanded(True)
         finally:
             self.file_tree.blockSignals(False)
@@ -185,8 +186,8 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
                 item = QtWidgets.QListWidgetItem(channel)
                 item.setData(QtCore.Qt.UserRole, channel)
                 self.channel_list.addItem(item)
-                default_selected = channel != self.x_axis_combo.currentText()
-                item.setSelected(default_selected if previous is None else channel in previous)
+                default = channel != self.x_axis_combo.currentText()
+                item.setSelected(default if previous is None else channel in previous)
         finally:
             self.channel_list.blockSignals(False)
         self._global_channels_initialized = True
@@ -194,7 +195,7 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
     def _activate(self, path: str) -> None:
         if path not in self.files:
             return
-        selected = self._selected_channels() if self._global_channels_initialized else None
+        selected_channels = self._selected_channels() if self._global_channels_initialized else None
         if self.active_path is not None:
             self.history[self.active_path] = (self.undo_stack, self.redo_stack)
         self.clear_plot()
@@ -207,7 +208,7 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         self.setWindowTitle(f"TCEditor - {Path(path).name} ({len(self.files)} files)")
         self._rebuild_tree()
         self.populate_controls()
-        self._populate_global_channels(selected)
+        self._populate_global_channels(selected_channels)
         self.refresh_plot()
 
     def _tree_clicked(self, item, column) -> None:
@@ -215,29 +216,22 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         if path and path != self.active_path:
             self._activate(path)
 
-    def _tree_changed(self, item, column) -> None:
-        if not self._rebuilding:
-            self.refresh_plot()
-
     def _visible_curves(self):
-        for i in range(self.file_tree.topLevelItemCount()):
-            file_item = self.file_tree.topLevelItem(i)
-            if not self._checked(file_item):
-                continue
-            path = file_item.data(0, PATH)
-            for j in range(file_item.childCount()):
-                item = file_item.child(j)
-                if not self._checked(item):
-                    continue
-                name = item.data(0, GROUP)
-                group = next((g for g in self.files[path].groups if g.name == name), None)
-                if group is not None:
+        selected = self.file_tree.selectedItems()
+        whole_files = {item.data(0, PATH) for item in selected
+                       if item.data(0, KIND) == "file"}
+        individual = {(item.data(0, PATH), item.data(0, GROUP))
+                      for item in selected if item.data(0, KIND) == "group"}
+        for path, data in self.files.items():
+            for group in data.groups:
+                if path in whole_files or (path, group.name) in individual:
                     yield path, group
 
     def _sync_editor_groups(self) -> None:
         if self.data is None or self.active_path is None:
             return
-        visible = {group.name for path, group in self._visible_curves() if path == self.active_path}
+        visible = {group.name for path, group in self._visible_curves()
+                   if path == self.active_path}
         self.group_list.blockSignals(True)
         try:
             for i in range(self.group_list.count()):
@@ -247,7 +241,7 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
             self.group_list.blockSignals(False)
 
     def refresh_plot(self) -> None:
-        if self._refreshing or self.data is None or not hasattr(self, "file_tree"):
+        if self._rebuilding or self._refreshing or self.data is None or not hasattr(self, "file_tree"):
             return
         self._refreshing = True
         try:
@@ -330,7 +324,7 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         if path not in self.files:
             return
         was_active = path == self.active_path
-        selected = self._selected_channels()
+        selected_channels = self._selected_channels()
         del self.files[path]
         self.history.pop(path, None)
         if was_active:
@@ -348,11 +342,13 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
             self._global_channels_initialized = False
         self._rebuild_tree()
         if was_active and self.files:
+            if not self.file_tree.selectedItems():
+                self.file_tree.topLevelItem(0).setSelected(True)
             self._activate(next(iter(self.files)))
-            self._populate_global_channels(selected)
+            self._populate_global_channels(selected_channels)
             self.refresh_plot()
         elif self.data is not None:
-            self._populate_global_channels(selected)
+            self._populate_global_channels(selected_channels)
             self.refresh_plot()
         else:
             self.setWindowTitle("TCEditor - multi-file")
@@ -369,14 +365,14 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
                 groups.append(group)
                 columns.add(self.files[path].group_column)
         if len(groups) < 2:
-            QtWidgets.QMessageBox.information(self, "3D surface", "Check at least two curves containing this channel.")
+            QtWidgets.QMessageBox.information(self, "3D surface", "Select at least two constant-y curves containing this channel.")
             return
         if len(columns) != 1:
-            QtWidgets.QMessageBox.warning(self, "3D surface", "All checked files must have the same constant-value column name.")
+            QtWidgets.QMessageBox.warning(self, "3D surface", "Selected files must have the same constant-value column name.")
             return
         values = [float(group.value) for group in groups]
         if len(set(values)) != len(values):
-            QtWidgets.QMessageBox.warning(self, "3D surface", "Duplicate constant-value curves selected. Uncheck duplicates before forming a surface.")
+            QtWidgets.QMessageBox.warning(self, "3D surface", "Duplicate constant-y values selected. Select only one curve per value.")
             return
         groups.sort(key=lambda group: group.value)
         data = CharacteristicData(
