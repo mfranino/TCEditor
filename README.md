@@ -1,67 +1,44 @@
 # TCEditor
 
-TCEditor is a small QtPy and pyqtgraph application for editing pump-turbine characteristic files. It opens characteristic text files, plots `Q11` and `T11` against `N11`, and keeps the graph and spreadsheet view synchronized while points and groups are edited.
+TCEditor is a QtPy/pyqtgraph editor for pump-turbine characteristic files. It plots `Q11` and `T11` against `N11`, synchronizes graph/table point editing, and provides 3D surface views.
 
 ## Installation
 
-Install Python 3.10 or newer, then install the required packages:
+Install Python 3.10 or newer:
 
 ```powershell
 pip install numpy qtpy "pyqtgraph>=0.14.0" PySide6 scipy PyOpenGL
 ```
 
-Run the standard 2D editor:
+Launch the **multi-file editor with 2D and 3D views** (recommended):
 
 ```powershell
-python tceditor.py
+python tceditor_multifile.py
 ```
 
-Run the editor with the additional 3D surface views:
+Legacy launchers remain available: `python tceditor.py` (single-file 2D) and `python tceditor_3d.py` (single-file 2D + 3D).
 
-```powershell
-python tceditor_3d.py
-```
+## Multi-file workflow
 
-## Supported File Format
+- Choose **File > Add characteristic files...** or the **Add characteristic files...** button; select several files in the dialog. Further openings append files instead of replacing the current workspace. Opening a file already loaded does not duplicate it.
+- The **Characteristic files** tree is organized as **file > constant-value curve > channels**. The first file column determines the constant-value grouping (e.g. `y` or `a0`). Each group contains its original `N11`, `Q11`, and `T11` arrays (and any other imported channels).
+- Check or uncheck file nodes, individual curve nodes, and individual channel nodes to show/hide their corresponding 2D curves. Checked curves from different files are overlaid on the same axes. `N11` is the default X axis, with `Q11` on the left and `T11` on the right.
+- Click any tree node to make its parent file the **active editing file** (shown in bold). Point dragging, point insertion/deletion, the spreadsheet, metadata, undo/redo, and **Save characteristic as...** apply only to this active file. Other files appear as read-only overlay curves until activated.
+- Right-click a curve in the tree to add a midpoint group (select two adjacent curves of the same file first) or to delete selected curves from the active file. Right-click a file to remove it from the workspace; this does not delete the disk file.
+- **View > Q11 3D surface...** or **View > T11 3D surface...** builds one surface from the checked curves in all loaded files. The selected files must share the same first-column name and the checked curves must have distinct constant values; uncheck duplicates if necessary.
 
-The parser is based on the MyScope characteristic import flow. It supports files with:
+## Supported file format
 
-- metadata lines starting with `;`
-- a `<list>` data section
-- a column header such as `a0    N11    Q11    T11`
-- numeric rows grouped by the first column
-- an optional closing `</list>`
+The parser accepts metadata lines beginning with `;`, a `<list>` section, a column header such as `y N11 Q11 T11` or `a0 N11 Q11 T11`, and numeric rows. The optional `</list>` marker is supported. File encodings `utf-8-sig`, `cp1250`, and `latin-1` are tried; rows can be separated by whitespace, tabs, semicolons, or commas.
 
-Files are read with `utf-8-sig`, `cp1250`, or `latin-1` encoding. Data rows may be whitespace, tab, semicolon, or comma separated.
+## Editing and visualization
 
-## Main Functions
-
-- Open characteristic files with `File > Open characteristic...`.
-- Use `N11` as the default X axis.
-- Plot `Q11` on the left Y axis and `T11` on the right Y axis.
-- Select visible groups and Y channels from the left control panel.
-- Pan and zoom the graph manually; refreshes preserve the current view range.
-- View all parsed data in the spreadsheet table on the right.
-- Click a plotted point to highlight the corresponding spreadsheet row.
-- Hover a point to show group, row, `N11`, and selected Y value.
-- Drag plotted points to edit `N11` and the selected Y channel.
-- Right-click a point to add a midpoint row or delete the selected row.
-- Select two neighboring groups, then use the group context menu to add a midpoint characteristic group.
-- Use the group context menu to delete one or more selected groups.
-- Undo point moves, point add/delete operations, and group add/delete operations with `Ctrl+Z`.
-- Redo edits with `Ctrl+Y`.
-- Save edited data with `File > Save characteristic as...`.
-- In `tceditor_3d.py`, open `View > Q11 3D surface...` to display a PyQtGraph OpenGL triangulated surface with `N11` on X, `a0` on Y, and `Q11` on Z.
-- In `tceditor_3d.py`, open `View > T11 3D surface...` to display a PyQtGraph OpenGL triangulated surface with `N11` on X, `a0` on Y, and `T11` on Z.
-- The 3D surfaces use SciPy Delaunay triangulation in the `N11-a0` plane and render the resulting triangles with `pyqtgraph.opengl.GLMeshItem`.
-- The triangulation is shown as mesh geometry without separate scatter-point markers.
-- The 3D windows use the current in-memory characteristic data, including point and group edits made before the window is opened.
+- Pan and zoom the 2D plot. Click a plotted point to select its corresponding spreadsheet row; hover to see channel and row information.
+- Drag points to edit `N11` and the selected Y channel. Right-click a point to add a midpoint or delete that row.
+- Undo/redo point and group operations using `Ctrl+Z` and `Ctrl+Y`.
+- The 3D OpenGL views use a topology-preserving mesh between neighboring constant-value groups. Each curve is linearly resampled at 150 equally spaced normalized arc-length stations for meshing; imported measurement points remain unchanged.
+- Each 3D view has actual numerical axis labels and a **Show scattered points** checkbox (off by default) to toggle the original imported data points.
 
 ## Saving
 
-Saved files preserve the characteristic text structure:
-
-- `;` metadata lines
-- `<list>`
-- tab-separated header and numeric rows
-- `</list>`
+**File > Save characteristic as...** writes only the active file's edited data, preserving its `;` metadata, `<list>` structure, header, and `</list>` marker. Rows in the saved file are tab-separated. Loading multiple files does not combine their data on disk.
