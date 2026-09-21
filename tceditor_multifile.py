@@ -1,6 +1,7 @@
-"""TCEditor multi-file launcher: file -> constant-value curve -> channels.
+"""Multi-file characteristic editor with global channel selection.
 
-Checked files plot together. Only the active file is edited or saved.
+Tree checkboxes select files and constant-y curves; the original Y channels
+list selects channels for every visible curve, as in the single-file editor.
 """
 from __future__ import annotations
 
@@ -18,11 +19,10 @@ from tceditor_3d import CharacteristicWindow3D, Surface3DWindow, _require_pyqtgr
 KIND = QtCore.Qt.UserRole
 PATH = QtCore.Qt.UserRole + 1
 GROUP = QtCore.Qt.UserRole + 2
-CHANNEL = QtCore.Qt.UserRole + 3
 
 
 class NamedSurface3DWindow(Surface3DWindow):
-    """Label the constant-value axis using the actual first column (e.g. y)."""
+    """Show the true group-column label, rather than hardcoded a0."""
 
     def _add_reference_axes(self, raw_mins: np.ndarray, raw_maxs: np.ndarray) -> None:
         x_span, y_span, z_span = map(float, self.DISPLAY_SPANS)
@@ -31,20 +31,20 @@ class NamedSurface3DWindow(Surface3DWindow):
         self.view.addItem(axes)
         grid = gl.GLGridItem()
         grid.setSize(x=x_span, y=y_span)
-        grid.setSpacing(x=x_span / 10.0, y=y_span / 10.0)
-        grid.translate(x_span / 2.0, y_span / 2.0, 0)
+        grid.setSpacing(x=x_span / 10, y=y_span / 10)
+        grid.translate(x_span / 2, y_span / 2, 0)
         self.view.addItem(grid)
         font = QtGui.QFont("Arial", 11)
         title_font = QtGui.QFont("Arial", 13)
         title_font.setBold(True)
         color = (20, 20, 20, 255)
-        ticks = [np.linspace(raw_mins[i], raw_maxs[i], self.AXIS_TICK_COUNT) for i in range(3)]
-        positions = [np.linspace(0, self.DISPLAY_SPANS[i], self.AXIS_TICK_COUNT) for i in range(3)]
         for axis_index in range(3):
-            for position, value in zip(positions[axis_index], ticks[axis_index]):
-                xyz = [(float(position), -0.38, -0.16),
-                       (-0.58, float(position), -0.16),
-                       (-0.58, -0.30, float(position))][axis_index]
+            values = np.linspace(raw_mins[axis_index], raw_maxs[axis_index], self.AXIS_TICK_COUNT)
+            positions = np.linspace(0, self.DISPLAY_SPANS[axis_index], self.AXIS_TICK_COUNT)
+            for position, value in zip(positions, values):
+                xyz = [(float(position), -.38, -.16),
+                       (-.58, float(position), -.16),
+                       (-.58, -.30, float(position))][axis_index]
                 self._add_text(xyz, self._format_axis_value(value), font, color)
         self._add_text((x_span + .45, 0, 0), "N11", title_font, color)
         self._add_text((0, y_span + .45, 0), self.data.group_column, title_font, color)
@@ -58,10 +58,11 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         self.active_path: str | None = None
         self._rebuilding = False
         self._refreshing = False
+        self._global_channels_initialized = False
         super().__init__()
 
         self.file_tree = QtWidgets.QTreeWidget()
-        self.file_tree.setHeaderLabels(["Files / constant-value curves / channels"])
+        self.file_tree.setHeaderLabels(["Files / constant-y curves"])
         self.file_tree.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.file_tree.itemChanged.connect(self._tree_changed)
         self.file_tree.itemClicked.connect(self._tree_clicked)
@@ -73,15 +74,15 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         self.addDockWidget(QtCore.Qt.LeftDockWidgetArea, dock)
         self.resizeDocks([dock], [310], QtCore.Qt.Horizontal)
 
-        # Keep the original flat widgets as internal editing controls. The tree
-        # replaces them for selecting files, curves and individual channels.
+        # Hide ONLY the obsolete flat group controls. Restore the original
+        # shared Y-channel selector, keeping N11 available as an X-axis choice.
         layout = self.group_list.parentWidget().layout()
-        for index in (3, 5):
-            widget = layout.itemAt(index).widget()
-            if widget is not None:
-                widget.hide()
+        layout.itemAt(3).widget().hide()  # Groups label
         self.group_list.hide()
-        self.channel_list.hide()
+        self.channel_list.show()
+        layout.itemAt(5).widget().show()  # Y channels label
+        self.channel_list.itemSelectionChanged.connect(self.refresh_plot)
+
         self.open_action.setText("Add characteristic files...")
         self.open_button.setText("Add characteristic files...")
         file_menu = self.menuBar().actions()[0].menu()
@@ -137,11 +138,7 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
             old[(path,)] = self._checked(file_item)
             for j in range(file_item.childCount()):
                 group_item = file_item.child(j)
-                group_name = group_item.data(0, GROUP)
-                old[(path, group_name)] = self._checked(group_item)
-                for k in range(group_item.childCount()):
-                    child = group_item.child(k)
-                    old[(path, group_name, child.data(0, CHANNEL))] = self._checked(child)
+                old[(path, group_item.data(0, GROUP))] = self._checked(group_item)
         self._rebuilding = True
         self.file_tree.blockSignals(True)
         try:
@@ -158,32 +155,46 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
                 font.setBold(path == self.active_path)
                 file_item.setFont(0, font)
                 for group in data.groups:
-                    group_item = QtWidgets.QTreeWidgetItem([f"{group.name} ({group.row_count} points)"])
-                    group_item.setData(0, KIND, "group")
-                    group_item.setData(0, PATH, path)
-                    group_item.setData(0, GROUP, group.name)
-                    group_item.setFlags(group_item.flags() | QtCore.Qt.ItemIsUserCheckable)
-                    group_item.setCheckState(0, QtCore.Qt.Checked if old.get((path, group.name), True) else QtCore.Qt.Unchecked)
-                    file_item.addChild(group_item)
-                    for channel in group.channels:
-                        item = QtWidgets.QTreeWidgetItem([channel])
-                        item.setData(0, KIND, "channel")
-                        item.setData(0, PATH, path)
-                        item.setData(0, GROUP, group.name)
-                        item.setData(0, CHANNEL, channel)
-                        item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
-                        default = channel != "N11"
-                        item.setCheckState(0, QtCore.Qt.Checked if old.get((path, group.name, channel), default) else QtCore.Qt.Unchecked)
-                        group_item.addChild(item)
+                    item = QtWidgets.QTreeWidgetItem([f"{group.name} ({group.row_count} points)"])
+                    item.setData(0, KIND, "group")
+                    item.setData(0, PATH, path)
+                    item.setData(0, GROUP, group.name)
+                    item.setFlags(item.flags() | QtCore.Qt.ItemIsUserCheckable)
+                    item.setCheckState(0, QtCore.Qt.Checked if old.get((path, group.name), True) else QtCore.Qt.Unchecked)
+                    file_item.addChild(item)
                 file_item.setExpanded(True)
         finally:
             self.file_tree.blockSignals(False)
             self._rebuilding = False
         self.remove_action.setEnabled(bool(self.files))
 
+    def _selected_channels(self) -> set[str]:
+        return {item.data(QtCore.Qt.UserRole) for item in self.channel_list.selectedItems()}
+
+    def _populate_global_channels(self, previous: set[str] | None) -> None:
+        channels = []
+        for data in self.files.values():
+            for group in data.groups:
+                for channel in group.channels:
+                    if channel not in channels:
+                        channels.append(channel)
+        self.channel_list.blockSignals(True)
+        try:
+            self.channel_list.clear()
+            for channel in channels:
+                item = QtWidgets.QListWidgetItem(channel)
+                item.setData(QtCore.Qt.UserRole, channel)
+                self.channel_list.addItem(item)
+                default_selected = channel != self.x_axis_combo.currentText()
+                item.setSelected(default_selected if previous is None else channel in previous)
+        finally:
+            self.channel_list.blockSignals(False)
+        self._global_channels_initialized = True
+
     def _activate(self, path: str) -> None:
         if path not in self.files:
             return
+        selected = self._selected_channels() if self._global_channels_initialized else None
         if self.active_path is not None:
             self.history[self.active_path] = (self.undo_stack, self.redo_stack)
         self.clear_plot()
@@ -196,7 +207,7 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         self.setWindowTitle(f"TCEditor - {Path(path).name} ({len(self.files)} files)")
         self._rebuild_tree()
         self.populate_controls()
-        self._sync_editor_controls()
+        self._populate_global_channels(selected)
         self.refresh_plot()
 
     def _tree_clicked(self, item, column) -> None:
@@ -215,65 +226,37 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
                 continue
             path = file_item.data(0, PATH)
             for j in range(file_item.childCount()):
-                group_item = file_item.child(j)
-                if not self._checked(group_item):
+                item = file_item.child(j)
+                if not self._checked(item):
                     continue
-                name = group_item.data(0, GROUP)
+                name = item.data(0, GROUP)
                 group = next((g for g in self.files[path].groups if g.name == name), None)
-                if group is None:
-                    continue
-                channels = {group_item.child(k).data(0, CHANNEL)
-                            for k in range(group_item.childCount())
-                            if self._checked(group_item.child(k))}
-                yield path, group, channels
+                if group is not None:
+                    yield path, group
 
-    def _sync_editor_controls(self) -> None:
+    def _sync_editor_groups(self) -> None:
         if self.data is None or self.active_path is None:
             return
-        visible = {group.name: channels for path, group, channels in self._visible_curves()
-                   if path == self.active_path}
+        visible = {group.name for path, group in self._visible_curves() if path == self.active_path}
         self.group_list.blockSignals(True)
-        self.channel_list.blockSignals(True)
         try:
             for i in range(self.group_list.count()):
                 item = self.group_list.item(i)
                 item.setSelected(item.data(QtCore.Qt.UserRole) in visible)
-            enabled = set().union(*visible.values()) if visible else set()
-            for i in range(self.channel_list.count()):
-                item = self.channel_list.item(i)
-                item.setSelected(item.data(QtCore.Qt.UserRole) in enabled)
         finally:
             self.group_list.blockSignals(False)
-            self.channel_list.blockSignals(False)
 
     def refresh_plot(self) -> None:
         if self._refreshing or self.data is None or not hasattr(self, "file_tree"):
             return
         self._refreshing = True
         try:
-            self._sync_editor_controls()
+            self._sync_editor_groups()
             super().refresh_plot()
-            selected = {(group.name, channel) for path, group, channels in self._visible_curves()
-                        if path == self.active_path for channel in channels}
-            # The legacy plot selector has one channel selection shared by every
-            # curve. Remove combinations unchecked at the individual tree node.
-            for series in list(self.series_items):
-                if (series["group"].name, series["y_channel"]) in selected:
-                    continue
-                for key in ("line", "points"):
-                    item = series[key]
-                    self.plot_item.removeItem(item)
-                    self.right_view.removeItem(item)
-                    if item in self.plot_items:
-                        self.plot_items.remove(item)
-                try:
-                    self.legend.removeItem(series["line"])
-                except Exception:
-                    pass
-                self.series_items.remove(series)
+            channels = self._selected_channels()
             x_channel = self.x_axis_combo.currentText()
             overlay = False
-            for path, group, channels in self._visible_curves():
+            for path, group in self._visible_curves():
                 if path == self.active_path:
                     continue
                 x = group.channels.get(x_channel)
@@ -347,6 +330,7 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
         if path not in self.files:
             return
         was_active = path == self.active_path
+        selected = self._selected_channels()
         del self.files[path]
         self.history.pop(path, None)
         if was_active:
@@ -361,35 +345,38 @@ class MultiFileCharacteristicWindow(CharacteristicWindow3D):
             self.save_action.setEnabled(False)
             self.undo_stack, self.redo_stack = [], []
             self.update_undo_action()
+            self._global_channels_initialized = False
         self._rebuild_tree()
         if was_active and self.files:
             self._activate(next(iter(self.files)))
+            self._populate_global_channels(selected)
+            self.refresh_plot()
         elif self.data is not None:
+            self._populate_global_channels(selected)
             self.refresh_plot()
         else:
             self.setWindowTitle("TCEditor - multi-file")
         self.statusBar().showMessage(f"{len(self.files)} characteristic file(s) loaded")
 
     def show_3d_surface(self, channel: str) -> None:
-        """Use checked curves from all files in one surface, without merging source data."""
+        if channel not in self._selected_channels():
+            QtWidgets.QMessageBox.information(self, "3D surface", f"Select {channel} in the global Y channels list first.")
+            return
         groups = []
         columns = set()
-        for path, group, channels in self._visible_curves():
-            if channel in channels and "N11" in group.channels:
+        for path, group in self._visible_curves():
+            if channel in group.channels and "N11" in group.channels:
                 groups.append(group)
                 columns.add(self.files[path].group_column)
         if len(groups) < 2:
-            QtWidgets.QMessageBox.information(
-                self, "3D surface", "Check at least two curves containing this channel.")
+            QtWidgets.QMessageBox.information(self, "3D surface", "Check at least two curves containing this channel.")
             return
         if len(columns) != 1:
-            QtWidgets.QMessageBox.warning(
-                self, "3D surface", "All checked files must have the same constant-value column name.")
+            QtWidgets.QMessageBox.warning(self, "3D surface", "All checked files must have the same constant-value column name.")
             return
         values = [float(group.value) for group in groups]
         if len(set(values)) != len(values):
-            QtWidgets.QMessageBox.warning(
-                self, "3D surface", "Duplicate constant-value curves selected. Uncheck duplicates before forming a surface.")
+            QtWidgets.QMessageBox.warning(self, "3D surface", "Duplicate constant-value curves selected. Uncheck duplicates before forming a surface.")
             return
         groups.sort(key=lambda group: group.value)
         data = CharacteristicData(
