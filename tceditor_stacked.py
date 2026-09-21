@@ -1,32 +1,63 @@
-"""Launch multi-file TCEditor with one vertically resizable control column.
+"""Launch the multi-file TCEditor with resizable controls and commit-based versioning.
 
-Plot selections are independent of which file is active for editing. Clicking
-individual curves never silently switches the editing file or resets the plot.
+Only highlighted constant-y curve rows determine plotted data. File rows are
+containers, not implicit selections of all their curves.
 """
 from __future__ import annotations
 
+import subprocess
 import sys
+from pathlib import Path
 
 import pyqtgraph as pg
 from qtpy import QtCore, QtWidgets
 
 from tceditor_3d import _require_pyqtgraph_014
-from tceditor_multifile import KIND, MultiFileCharacteristicWindow
+from tceditor_multifile import KIND, PATH, GROUP, MultiFileCharacteristicWindow
+
+# The commit immediately BEFORE the versioned series. The first descendant
+# commit is 0.0.1; each later commit increments the patch number automatically.
+VERSION_BASE_COMMIT = "7ef877635ddfafaf472b15dfdc5f40f0a1eb18c8"
+
+
+def build_version() -> tuple[str, str]:
+    """Return (version, revision) from this script's Git checkout, not the CWD."""
+    directory = Path(__file__).resolve().parent
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(directory), *args],
+            capture_output=True, text=True, check=True, timeout=3,
+        )
+        return result.stdout.strip()
+
+    try:
+        git("merge-base", "--is-ancestor", VERSION_BASE_COMMIT, "HEAD")
+        count = int(git("rev-list", "--count", f"{VERSION_BASE_COMMIT}..HEAD"))
+        revision = git("rev-parse", "--short=7", "HEAD")
+        return f"0.0.{max(count, 1)}", revision
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # Zip distributions / machines without Git cannot verify the revision.
+        return "0.0.1", "Git revision unavailable"
 
 
 class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
-    """Stack controls and support cumulative plotting across loaded files."""
+    """One control column and explicit, additive cross-file curve selection."""
 
     def __init__(self) -> None:
         super().__init__()
 
         self.file_tree.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
         self.file_tree.setHeaderLabels(["Files / constant-y curves (click to add/remove)"])
+        self.file_tree.setToolTip(
+            "Click curve rows to plot them; click again to remove them. "
+            "File names are containers, not a plot-all selection."
+        )
+        self._disable_file_row_selection()
 
         main_splitter = self.centralWidget()
         old_controls = self.group_list.parentWidget()
         old_layout = old_controls.layout()
-        # Keep hidden controls needed by the legacy editing operations.
         self._legacy_controls = old_controls
         x_label = old_layout.itemAt(1).widget()
         channels_label = old_layout.itemAt(5).widget()
@@ -84,26 +115,60 @@ class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
         main_splitter.setStretchFactor(2, 0)
         main_splitter.setSizes([330, 750, 330])
         vertical.setSizes([410, 180, 175])
-        self.setWindowTitle("TCEditor - multi-file")
+
+        self.app_version, self.app_revision = build_version()
+        self.version_label = QtWidgets.QLabel(
+            f"v{self.app_version}  |  {self.app_revision}"
+        )
+        self.statusBar().addPermanentWidget(self.version_label)
+        self._apply_version_title()
+
+    def _apply_version_title(self) -> None:
+        file_name = Path(self.active_path).name if self.active_path else "multi-file"
+        self.setWindowTitle(
+            f"TCEditor v{self.app_version} [{self.app_revision}] - {file_name} "
+            f"({len(self.files)} files)"
+        )
+
+    def _disable_file_row_selection(self) -> None:
+        """File headings are navigational containers, never plot-all selectors."""
+        self.file_tree.blockSignals(True)
+        try:
+            for index in range(self.file_tree.topLevelItemCount()):
+                item = self.file_tree.topLevelItem(index)
+                item.setSelected(False)
+                item.setFlags(item.flags() & ~QtCore.Qt.ItemIsSelectable)
+        finally:
+            self.file_tree.blockSignals(False)
+
+    def _rebuild_tree(self) -> None:
+        super()._rebuild_tree()
+        self._disable_file_row_selection()
+
+    def _visible_curves(self):
+        """Plot *only* explicitly selected curve rows from every loaded file."""
+        selected = {
+            (item.data(0, PATH), item.data(0, GROUP))
+            for item in self.file_tree.selectedItems()
+            if item.data(0, KIND) == "group"
+        }
+        for path, data in self.files.items():
+            for group in data.groups:
+                if (path, group.name) in selected:
+                    yield path, group
 
     def _tree_clicked(self, item, column) -> None:
-        """Select for plotting, but do not activate/rebuild a different file.
-
-        Automatically selected file rows from imports represent 'show all'.
-        Once the user starts selecting individual curves, clear those whole-file
-        selections so only explicitly selected curves are plotted. Clicking a
-        file row itself can still select the whole file deliberately.
-        """
-        if item.data(0, KIND) == "group" and item.isSelected():
-            self.file_tree.blockSignals(True)
-            try:
-                for index in range(self.file_tree.topLevelItemCount()):
-                    file_item = self.file_tree.topLevelItem(index)
-                    if file_item.isSelected():
-                        file_item.setSelected(False)
-            finally:
-                self.file_tree.blockSignals(False)
+        """Selecting another curve must never replace the active editing file."""
         self.refresh_plot()
+
+    def _activate(self, path: str) -> None:
+        super()._activate(path)
+        if hasattr(self, "app_version"):
+            self._apply_version_title()
+
+    def _remove_file(self, path: str) -> None:
+        super()._remove_file(path)
+        self._apply_version_title()
 
 
 def main() -> int:
@@ -111,6 +176,7 @@ def main() -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     pg.setConfigOptions(antialias=True)
     window = StackedCharacteristicWindow()
+    print(f"TCEditor v{window.app_version} [{window.app_revision}]")
     window.show()
     return app.exec_()
 
