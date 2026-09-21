@@ -19,6 +19,13 @@ class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
     def __init__(self) -> None:
         super().__init__()
 
+        # Qt ExtendedSelection clears earlier selections on a plain click.
+        # MultiSelection toggles each clicked curve independently, including
+        # curves belonging to different files. _visible_curves() already uses
+        # the complete selectedItems() set to build the combined plot.
+        self.file_tree.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        self.file_tree.setHeaderLabels(["Files / constant-y curves (click to add/remove)"])
+
         main_splitter = self.centralWidget()
         old_controls = self.group_list.parentWidget()
         old_layout = old_controls.layout()
