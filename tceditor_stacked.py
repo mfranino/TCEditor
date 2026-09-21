@@ -1,7 +1,6 @@
-"""Launch the multi-file TCEditor with one vertically resizable control column.
+"""Launch multi-file TCEditor with one vertically resizable control column.
 
-The underlying multi-file loader, mouse-based curve selection, global channel
-selection, editing, saving, and 3D views are reused without modification.
+The existing multi-file loading, selection, editing and plotting logic is reused.
 """
 from __future__ import annotations
 
@@ -15,21 +14,16 @@ from tceditor_multifile import MultiFileCharacteristicWindow
 
 
 class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
-    """Put all controls in one column with independent resize handles."""
+    """Move existing widgets into a single sidebar with drag-to-resize panels."""
 
     def __init__(self) -> None:
         super().__init__()
 
-        # The original 2D editor has its controls in the first widget of the
-        # horizontal splitter. Preserve this widget for the internal, hidden
-        # group list used by its editing operations.
         main_splitter = self.centralWidget()
         old_controls = self.group_list.parentWidget()
         old_layout = old_controls.layout()
+        # Preserve the hidden legacy group list required for edit operations.
         self._legacy_controls = old_controls
-
-        # Existing label/widget objects are reused: Qt signal connections,
-        # selection state and editing behavior are not recreated or altered.
         x_label = old_layout.itemAt(1).widget()
         channels_label = old_layout.itemAt(5).widget()
         metadata_label = old_layout.itemAt(7).widget()
@@ -38,16 +32,13 @@ class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
                        metadata_label, self.metadata_view):
             old_layout.removeWidget(widget)
 
-        # takeWidget() detaches the existing tree without deleting it.
         dock = self.findChild(QtWidgets.QDockWidget, "CharacteristicFilesDock")
-        if dock is None:
+        if dock is None or dock.widget() is not self.file_tree:
             raise RuntimeError("Multi-file tree dock was not found.")
-        tree = dock.takeWidget()
-        if tree is not self.file_tree:
-            raise RuntimeError("Unexpected file-tree dock contents.")
+        # The tree is reparented by vertical.addWidget below. Keep the dock
+        # alive until that happens, so Qt cannot delete the tree prematurely.
         self.removeDockWidget(dock)
-        dock.deleteLater()
-
+        dock.hide()
         old_controls.setParent(None)
         old_controls.hide()
 
@@ -82,6 +73,7 @@ class StackedCharacteristicWindow(MultiFileCharacteristicWindow):
         metadata_panel.setMinimumHeight(75)
         vertical.addWidget(metadata_panel)
 
+        dock.deleteLater()
         sidebar_layout.addWidget(vertical, 1)
         self.control_splitter = vertical
         main_splitter.insertWidget(0, sidebar)
